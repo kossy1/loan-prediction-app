@@ -1,0 +1,21 @@
+# Exclude development files
+venv/
+env/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+data/
+notebooks/
+*.ipynb
+*.md
+docs/
+.git/
+.gitignore
+.env
+.env.*
+!.env.example
+.DS_Store
+Thumbs.db
+desktop.ini

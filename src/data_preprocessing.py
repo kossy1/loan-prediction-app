@@ -55,9 +55,20 @@ class DataPreprocessor:
             'scaler': self.scaler,
             'encoders': self.categorical_encoders
         }, filepath)
+        print(f"✅ Scalers saved to {filepath}")
     
     def load_scalers(self, filepath='models/scalers.joblib'):
         """Load scalers and encoders"""
-        data = joblib.load(filepath)
-        self.scaler = data['scaler']
-        self.categorical_encoders = data['encoders']
+        if not os.path.exists(filepath):
+            print(f"⚠️ Scalers file not found: {filepath}")
+            return False
+        
+        try:
+            data = joblib.load(filepath)
+            self.scaler = data['scaler']
+            self.categorical_encoders = data['encoders']
+            print(f"✅ Scalers loaded from {filepath}")
+            return True
+        except Exception as e:
+            print(f"⚠️ Error loading scalers: {e}")
+            return False

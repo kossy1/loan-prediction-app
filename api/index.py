@@ -2,29 +2,22 @@ import sys
 import os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
-from typing import Optional
-import joblib
-import numpy as np
-import pandas as pd
+from datetime import datetime
 import warnings
+import numpy as np
+
 warnings.filterwarnings('ignore')
 
-# Import your modules
-from src.data_preprocessing import DataPreprocessor
-from src.model_training import ModelTrainer
-from src.utils import validate_input, preprocess_input, format_prediction_response
-
-# Initialize FastAPI app
 app = FastAPI(
     title="Loan Approval Prediction API",
-    description="Machine Learning API for predicting loan approval using Logistic Regression and XGBoost",
+    description="Predict loan approval using Logistic Regression",
     version="1.0.0"
 )
 
-# Add CORS middleware
+# Add CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -33,40 +26,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize models
-preprocessor = DataPreprocessor()
-trainer = ModelTrainer()
+# Global variables
+model = None
+scaler = None
+models_loaded = False
 
-# Define request model - Pydantic v2 compatible
+# Request model
 class LoanApplication(BaseModel):
-    age: int = Field(ge=18, le=100, description="Applicant's age")
-    income: float = Field(ge=0, le=1000000, description="Annual income")
-    credit_score: int = Field(ge=300, le=850, description="Credit score")
-    employment_years: float = Field(ge=0, le=50, description="Years of employment")
-    debt_ratio: float = Field(ge=0, le=1, description="Debt to income ratio")
-    loan_amount: float = Field(ge=0, le=1000000, description="Requested loan amount")
-    interest_rate: float = Field(ge=0, le=30, description="Interest rate")
-    dependents: int = Field(ge=0, le=10, description="Number of dependents")
-    education_level: int = Field(ge=1, le=5, description="Education level (1-5)")
-    employment_type: int = Field(ge=1, le=4, description="Employment type (1-4)")
-    
-    class Config:
-        json_schema_extra = {
-            "example": {
-                "age": 35,
-                "income": 60000,
-                "credit_score": 720,
-                "employment_years": 8,
-                "debt_ratio": 0.35,
-                "loan_amount": 150000,
-                "interest_rate": 4.5,
-                "dependents": 2,
-                "education_level": 4,
-                "employment_type": 2
-            }
-        }
+    age: int = Field(ge=18, le=100)
+    income: float = Field(ge=0, le=1000000)
+    credit_score: int = Field(ge=300, le=850)
+    employment_years: float = Field(ge=0, le=50)
+    debt_ratio: float = Field(ge=0, le=1)
+    loan_amount: float = Field(ge=0, le=1000000)
+    interest_rate: float = Field(ge=0, le=30)
+    dependents: int = Field(ge=0, le=10)
+    education_level: int = Field(ge=1, le=5)
+    employment_type: int = Field(ge=1, le=4)
 
-# Define response model
+# Response model
 class PredictionResponse(BaseModel):
     prediction: int
     probability: float
@@ -75,107 +53,132 @@ class PredictionResponse(BaseModel):
     model_used: str
     timestamp: str
 
-# Load models at startup
-@app.on_event("startup")
-async def load_models():
-    """Load trained models and preprocessor"""
+def load_model_gracefully():
+    """Try to load model, return success status"""
+    global model, scaler, models_loaded
+    
     try:
-        # Try to load saved models
-        preprocessor.load_scalers('models/scalers.joblib')
-        trainer.load_models('models/logistic_model.pkl', 'models/xgboost_model.pkl')
-        print("✅ Models and preprocessor loaded successfully!")
+        import joblib
+        
+        # Check if files exist
+        if not os.path.exists('models/logistic_model.pkl'):
+            print("⚠️ Model file not found")
+            models_loaded = False
+            return False
+        
+        if not os.path.exists('models/scalers.joblib'):
+            print("⚠️ Scaler file not found")
+            models_loaded = False
+            return False
+        
+        # Load model and scaler
+        model = joblib.load('models/logistic_model.pkl')
+        scaler = joblib.load('models/scalers.joblib')
+        
+        models_loaded = True
+        print("✅ Logistic Regression model loaded successfully!")
+        return True
+        
     except Exception as e:
-        print(f"⚠️  Error loading models: {e}")
-        print("Creating dummy models for deployment...")
+        print(f"⚠️ Error loading model: {e}")
+        models_loaded = False
+        return False
+
+def predict_with_model(data):
+    """Predict using Logistic Regression"""
+    global model, scaler
+    
+    if not models_loaded:
+        return None, None
+    
+    try:
+        features = np.array([[
+            data['age'],
+            data['income'],
+            data['credit_score'],
+            data['employment_years'],
+            data['debt_ratio'],
+            data['loan_amount'],
+            data['interest_rate'],
+            data['dependents'],
+            data['education_level'],
+            data['employment_type']
+        ]])
         
-        # Create dummy models for deployment if not available
-        from sklearn.linear_model import LogisticRegression
-        from xgboost import XGBClassifier
-        from sklearn.preprocessing import StandardScaler
+        features_scaled = scaler.transform(features)
+        probability = model.predict_proba(features_scaled)[0][1]
+        prediction = 1 if probability >= 0.5 else 0
         
-        trainer.logistic_model = LogisticRegression()
-        trainer.xgboost_model = XGBClassifier()
-        preprocessor.scaler = StandardScaler()
-        print("✅ Dummy models created for deployment")
+        return prediction, probability
+        
+    except Exception as e:
+        print(f"⚠️ Error predicting: {e}")
+        return None, None
+
+def predict_with_fallback(data):
+    """Rule-based fallback prediction"""
+    score = 0
+    if data['credit_score'] > 650: score += 1
+    if data['debt_ratio'] < 0.4: score += 1
+    if data['employment_years'] > 5: score += 1
+    if data['income'] > 50000: score += 1
+    if data['loan_amount'] < 200000: score += 1
+    
+    prediction = 1 if score >= 3 else 0
+    probability = 0.6 + (score * 0.08)
+    probability = min(probability, 0.95)
+    
+    return prediction, probability
+
+# Load model at startup
+try:
+    load_model_gracefully()
+except Exception as e:
+    print(f"⚠️ Startup error: {e}")
+    models_loaded = False
 
 @app.get("/")
 async def root():
-    """Root endpoint with API information"""
     return {
         "message": "Loan Approval Prediction API",
         "version": "1.0.0",
-        "endpoints": {
-            "/": "GET - This information",
-            "/health": "GET - Health check",
-            "/predict": "POST - Predict using ensemble model",
-            "/predict/logistic": "POST - Predict using Logistic Regression",
-            "/predict/xgboost": "POST - Predict using XGBoost"
-        },
-        "docs": "/docs",
-        "redoc": "/redoc"
+        "status": "running",
+        "models_loaded": models_loaded,
+        "model_type": "Logistic Regression"
     }
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
     return {
         "status": "healthy",
-        "models_loaded": trainer.logistic_model is not None and trainer.xgboost_model is not None,
-        "preprocessor_loaded": preprocessor.scaler is not None
+        "models_loaded": models_loaded,
+        "timestamp": datetime.now().isoformat()
     }
 
 @app.post("/predict", response_model=PredictionResponse)
 async def predict(application: LoanApplication):
-    """Predict loan approval using ensemble of Logistic Regression and XGBoost"""
     try:
-        # Validate input
-        validate_input(application.model_dump())
+        data = application.dict()
         
-        # Preprocess
-        X = preprocess_input(application.model_dump(), preprocessor)
+        # Try ML model first
+        prediction, probability = predict_with_model(data)
         
-        # Predict using ensemble
-        prediction, probability = trainer.predict_loan_approval(X, model_type='ensemble')
+        # Fallback to rule-based if needed
+        if prediction is None:
+            prediction, probability = predict_with_fallback(data)
+            model_used = "rule-based (fallback)"
+        else:
+            model_used = "Logistic Regression"
         
-        # Format response
-        response = format_prediction_response(prediction, probability, 'ensemble')
-        return response
+        return {
+            "prediction": int(prediction),
+            "probability": float(probability),
+            "status": "Approved" if prediction == 1 else "Rejected",
+            "confidence": float(probability if prediction == 1 else 1 - probability),
+            "model_used": model_used,
+            "timestamp": datetime.now().isoformat()
+        }
         
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
-        )
     except Exception as e:
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Prediction error: {str(e)}"
-        )
-
-@app.post("/predict/logistic", response_model=PredictionResponse)
-async def predict_logistic(application: LoanApplication):
-    """Predict loan approval using Logistic Regression only"""
-    try:
-        validate_input(application.model_dump())
-        X = preprocess_input(application.model_dump(), preprocessor)
-        prediction, probability = trainer.predict_loan_approval(X, model_type='logistic')
-        response = format_prediction_response(prediction, probability, 'logistic')
-        return response
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
-
-@app.post("/predict/xgboost", response_model=PredictionResponse)
-async def predict_xgboost(application: LoanApplication):
-    """Predict loan approval using XGBoost only"""
-    try:
-        validate_input(application.model_dump())
-        X = preprocess_input(application.model_dump(), preprocessor)
-        prediction, probability = trainer.predict_loan_approval(X, model_type='xgboost')
-        response = format_prediction_response(prediction, probability, 'xgboost')
-        return response
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    except Exception as e:
+        print(f"❌ Prediction error: {e}")
         raise HTTPException(status_code=500, detail=f"Prediction error: {str(e)}")
